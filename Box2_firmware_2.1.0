@@ -1,0 +1,331 @@
+#include <MIDI.h>
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
+
+
+
+/* BOX 2 Firmware 2022
+ * 
+ * – Feature list –
+ * 
+ * Floor inputs x9 to cc;
+ * Floor inputs x9 to pitchbend, comment out;
+ * Filter inputs;
+ * 
+ * if(switch1 == LOW) {Floor inputs to hardware MIDI};
+ * if(switch1 == LOW) {Floor inputs to CV};
+ * if(switch1 == HIGH) {MIDI Interface};
+ * if(switch1 == HIGH) {CV Interface};
+ * 
+ * Power led on boot;
+ * Data led on usbMIDI.read();
+ * 
+ * Hold switch2 to zero;
+ * 
+ * Beep on boot;
+ * Beep on zero;
+ * Beep on I/F mode change;
+ * 
+ * Zero from MIDI command;
+ * 
+ * 
+ */
+
+
+
+// HARDWARE PINS
+const int sw1Pin =  0; // I/F mode switch
+const int sw2Pin = 1; // zeroing button
+const int led1Pin = 2; // power status led
+const int led2Pin = 3; // data status led
+const int buzz = 6; // buzzer
+
+const int strain1Pin = A0; // XLR inputs 1 through 9
+const int strain2Pin = A1;
+const int strain3Pin = A2;
+const int strain4Pin = A3;
+const int strain5Pin = A4;
+const int strain6Pin = A5;
+const int strain7Pin = A6;
+const int strain8Pin = A7;
+const int strain9Pin = A8;
+
+const int cv1Pin = 4; // CV outputs 1 through 4
+const int cv2Pin = 5;
+const int cv3Pin = 9;
+const int cv4Pin = 12;
+
+// FILTER VARIABLES
+int strain1;
+int strain2;
+int strain3;
+int strain4;
+int strain5;
+int strain6;
+int strain7;
+int strain8;
+int strain9;
+float filterVal;       // this determines smoothness  - .0001 is max  1 is off (no smoothing)
+float smoothedVal1;     // this holds the last loop value 
+float smoothedVal2;    
+float smoothedVal3;
+float smoothedVal4;
+float smoothedVal5;
+float smoothedVal6;
+float smoothedVal7;
+float smoothedVal8;
+float smoothedVal9;
+float offset1;
+float offset2;
+float offset3;
+float offset4;
+float offset5;
+float offset6;
+float offset7;
+float offset8;
+float offset9;
+float output1;
+float output2;
+float output3;
+float output4;
+float output5;
+float output6;
+float output7;
+float output8;
+float output9;
+
+// LOGIC VARIABLES
+int sw1;
+int sw2;
+int zero;
+int iface;
+int pressTime;
+
+// CONSTANTS
+int ccScale = 7; // Use this to scale cc from floors. 
+int zeroVal = 15; // Use this to set zero point offset.
+
+
+void setup() {
+
+  MIDI.begin();
+  usbMIDI.setHandleControlChange(ctlin); // set handle for incoming MIDI
+
+  pinMode(sw1Pin, INPUT_PULLUP);
+  pinMode(sw2Pin, INPUT_PULLUP);
+  pinMode(led1Pin, OUTPUT);
+  pinMode(led2Pin, OUTPUT);
+
+
+
+// BOOT ROUTINE
+  delay(700); // warmup and double beep
+  tone(buzz, 2000, 150);
+  digitalWrite(led1Pin, HIGH);
+  digitalWrite(led2Pin, HIGH);
+  delay(400);
+  digitalWrite(led1Pin, LOW);
+  digitalWrite(led2Pin, LOW);
+  tone(buzz, 2000, 150);
+  delay(300);
+  digitalWrite(led1Pin, HIGH);
+
+}
+
+void loop() {
+  
+  sw1 = digitalRead(sw1Pin);
+  sw2 = digitalRead(sw2Pin);
+
+  usbMIDI.read();
+
+  // LP Filter implementation
+  filterVal = 0.75; //Low pass filter coefficient - applies to all inputs. Must = 0 to 1. 
+  
+  strain1 = analogRead(strain1Pin);
+  smoothedVal1 =  smooth(strain1, filterVal, smoothedVal1);
+  
+  strain2 = analogRead(strain2Pin);
+  smoothedVal2 =  smooth(strain2, filterVal, smoothedVal2);
+  
+  strain3 = analogRead(strain3Pin);
+  smoothedVal3 =  smooth(strain3, filterVal, smoothedVal3);
+  
+  strain4 = analogRead(strain4Pin);
+  smoothedVal4 =  smooth(strain4, filterVal, smoothedVal4);
+  
+  strain5 = analogRead(strain5Pin);
+  smoothedVal5 =  smooth(strain5, filterVal, smoothedVal5);
+  
+  strain6 = analogRead(strain6Pin);
+  smoothedVal6 =  smooth(strain6, filterVal, smoothedVal6);
+  
+  strain7 = analogRead(strain7Pin);
+  smoothedVal7 =  smooth(strain7, filterVal, smoothedVal7);
+  
+  strain8 = analogRead(strain8Pin);
+  smoothedVal8 =  smooth(strain8, filterVal, smoothedVal8);
+  
+  strain9 = analogRead(strain9Pin);
+  smoothedVal9 =  smooth(strain9, filterVal, smoothedVal9);
+
+// offsets for zeroing
+  output1 = smoothedVal1 - offset1;
+  output2 = smoothedVal2 - offset2;
+  output3 = smoothedVal3 - offset3;
+  output4 = smoothedVal4 - offset4;
+  output5 = smoothedVal5 - offset5;
+  output6 = smoothedVal6 - offset6;
+  output7 = smoothedVal7 - offset7;
+  output8 = smoothedVal8 - offset8;
+  output9 = smoothedVal9 - offset9;
+
+  
+// USB MIDI floor output
+  usbMIDI.sendControlChange(1, output1 / ccScale, 1); // output floor values to CCs on channel 1
+  usbMIDI.sendControlChange(2, output2 / ccScale, 1);
+  usbMIDI.sendControlChange(3, output3 / ccScale, 1);
+  usbMIDI.sendControlChange(4, output4 / ccScale, 1);
+  usbMIDI.sendControlChange(5, output5 / ccScale, 1);
+  usbMIDI.sendControlChange(6, output6 / ccScale, 1);
+  usbMIDI.sendControlChange(7, output7 / ccScale, 1);
+  usbMIDI.sendControlChange(8, output8 / ccScale, 1);
+  usbMIDI.sendControlChange(9, output9 / ccScale, 1);
+// Hardware MIDI floor output
+  if(sw1 == LOW) {
+    MIDI.sendControlChange(1, output1 / ccScale, 1); // output floor values to MIDI port if I/F mode
+    MIDI.sendControlChange(2, output2 / ccScale, 1);
+    MIDI.sendControlChange(3, output3 / ccScale, 1);
+    MIDI.sendControlChange(4, output4 / ccScale, 1);
+    MIDI.sendControlChange(5, output5 / ccScale, 1);
+    MIDI.sendControlChange(6, output6 / ccScale, 1);
+    MIDI.sendControlChange(7, output7 / ccScale, 1);
+    MIDI.sendControlChange(8, output8 / ccScale, 1);
+    MIDI.sendControlChange(9, output9 / ccScale, 1);
+// CV floor output
+    analogWrite(cv1Pin, output1 / 8);
+    analogWrite(cv2Pin, output2 / 8);
+    analogWrite(cv3Pin, output3 / 8);
+    analogWrite(cv4Pin, output4 / 8);  
+  } // end sw1 == LOW
+
+ // Switch Logic
+  if(iface == LOW && sw1 == HIGH) {
+    iface = HIGH;
+    delay(200);
+    tone(buzz, 1800, 300);
+    delay(305);
+  }
+  if(iface == HIGH && sw1 == LOW) {
+    iface = LOW;
+    delay(200);
+    tone(buzz, 1800, 300); 
+    delay(305);   
+  }
+
+  while(sw2 == LOW) {
+    delay(20); // debounce button
+    pressTime++;
+    sw2 = digitalRead(sw2Pin);
+    if(pressTime == 50) {
+      zero = HIGH;
+      tone(buzz, 2200);
+    }
+  }
+  pressTime = 0;
+  noTone(buzz);
+// Zeroing
+  if(zero == HIGH) {
+    zero = LOW;
+    offset1 = smoothedVal1 - zeroVal;
+    offset2 = smoothedVal2 - zeroVal;
+    offset3 = smoothedVal3 - zeroVal;
+    offset4 = smoothedVal4 - zeroVal;
+    offset5 = smoothedVal5 - zeroVal;
+    offset6 = smoothedVal6 - zeroVal;
+    offset7 = smoothedVal7 - zeroVal;
+    offset8 = smoothedVal8 - zeroVal;
+    offset9 = smoothedVal9 - zeroVal;
+    tone(buzz, 2200);
+    delay(800); 
+    noTone(buzz);   
+  }
+
+
+  
+/* Obsolete pitchbend MIDI from BOX 1 (enable for backwards-compatibility)
+  usbMIDI.sendPitchBend(smoothedVal1, 1);
+  usbMIDI.sendPitchBend(smoothedVal2, 2);
+  usbMIDI.sendPitchBend(smoothedVal3, 3);
+  usbMIDI.sendPitchBend(smoothedVal4, 4);
+  usbMIDI.sendPitchBend(smoothedVal5, 5);
+  usbMIDI.sendPitchBend(smoothedVal6, 6);
+  usbMIDI.sendPitchBend(smoothedVal7, 7);
+  usbMIDI.sendPitchBend(smoothedVal8, 8);
+  usbMIDI.sendPitchBend(smoothedVal9, 9); */
+
+  delay(10); // refresh rate
+  digitalWrite(led2Pin, LOW); // led must be turned off here so that it's on for most of the cycle.
+
+} // end main program
+
+
+void ctlin(byte channel, byte control, byte value) { // handle incoming usb MIDI
+
+  if(sw1 == HIGH) { // only process if switch is in I/F mode.
+    digitalWrite(led2Pin, HIGH); // causes the data led to blink when MIDI Rx
+    
+    if(channel == 1) { // channel 1 goes to hardware MIDI.
+      MIDI.sendControlChange(control, value, 1);
+      
+    } // end channel 1
+
+
+    if(channel == 2) { // channel 2 goes to CV, cc5 is used for MIDI zeroing.
+      
+      switch (control) {
+        case 1:
+          analogWrite(cv1Pin, value * 2);
+          break;
+        case 2:
+          analogWrite(cv2Pin, value * 2);
+          break;
+        case 3:
+          analogWrite(cv3Pin, value * 2);
+          break;
+        case 4:
+          analogWrite(cv4Pin, value * 2);
+          break; 
+        case 5:
+          if(value > 0) // if data received on cc5, implement zero
+            zero = HIGH;
+          break;                                            
+      }
+    
+     } // end channel 2
+    
+  } // end sw1 (I/F mode)
+
+} // end MIDI interface handling
+
+
+
+int smooth(int data, float filterVal, int smoothedVal){ // filtering
+
+
+  if (filterVal > 1){      // check to make sure param's are within range
+    filterVal = .99;
+  }
+  else if (filterVal <= 0){
+    filterVal = 0;
+  }
+
+  smoothedVal = (data * (1 - filterVal)) + (smoothedVal  *  filterVal);
+
+  return (int)smoothedVal;
+  
+}
+
+
+
+
+
