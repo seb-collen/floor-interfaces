@@ -1,0 +1,420 @@
+#include <MIDI.h>
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
+
+
+/* BOX 3 Firmware 2023-2024
+ * 
+ * – Feature list –
+ * 
+ * – Fixed input impedance issue causing crosstalk between channels.
+ * – Changed MIDI message structure, now data is only sent when changing (no repeated data).
+ * – Re-implemented high resolution data via MIDI pitchbend. (USB only)
+ * – Hold buttons allow channels to be muted.
+ * – Bargraph shows level of the channel receiving the highest value.
+ * – Hardware MIDI port that can also be used as an interface.
+ * – Interface mode is activated upon any MIDI data being received.
+ * – Fixed overflowing MIDI values (now better scaled and constrained).
+ * – MIDI device name changed via IDE configuration files (BOX 3A).
+ * 
+ */
+
+
+
+// HARDWARE PINS
+
+const int bar10 =  0; // These are for the simple bargraph.
+const int bar9 = 1;
+const int bar8 = 2;
+const int bar7 = 3;
+const int bar6 = 4;
+const int bar5 = 5;
+const int bar4 = 6;
+const int bar3 = 11; // pins 7 and 8 can't be used due to MIDI on Serial1.
+const int bar2 = 9;
+const int bar1 = 10;
+
+const int midiLed = 12; // midi status led
+
+const int sw4Pin = 20; // channel hold switches
+const int sw3Pin = 18;
+const int sw2Pin = 16;
+const int sw1Pin = 14;
+
+const int strain1Pin = A8; // XLR inputs 1 through 4
+const int strain2Pin = A6;
+const int strain3Pin = A4;
+const int strain4Pin = A2;
+
+const int ch1Led = 21; // channel indicator leds
+const int ch2Led = 22;
+const int ch3Led = 23;
+const int ch4Led = 24;
+
+
+// FILTER VARIABLES
+int strain1;
+int strain2;
+int strain3;
+int strain4;
+
+float filterVal;       // this determines smoothness  - .0001 is max  1 is off (no smoothing)
+float smoothedVal1;     // these hold the last loop value 
+float smoothedVal2;    
+float smoothedVal3;
+float smoothedVal4;
+
+float offset1;
+float offset2;
+float offset3;
+float offset4;
+
+float output1;
+float output2;
+float output3;
+float output4;
+
+
+// LOGIC VARIABLES
+int sw1;
+int sw2;
+int sw3;
+int sw4;
+int zero;
+int zeroTime = 0;
+int ch1State;
+
+int midiRx;
+int midiOut1;
+int midiOut2;
+int midiOut3;
+int midiOut4;
+int prevOut1;
+int prevOut2;
+int prevOut3;
+int prevOut4;
+int maxVal;
+int maxLed;
+int blinkTime;
+int blinkState;
+
+int barGraph[10] = {10, 9, 11, 6, 5, 4, 3, 2, 1, 0};
+
+
+// CONSTANTS
+int ccScale = 7; // Use this to scale cc from floors. 
+int zeroVal = 10; // Use this to set zero point offset.// changed to 10
+
+
+void setup() {
+
+  MIDI.begin();
+  usbMIDI.setHandleControlChange(ctlin); // set handle for incoming MIDI
+
+  pinMode(sw1Pin, INPUT_PULLUP);
+  pinMode(sw2Pin, INPUT_PULLUP);
+  pinMode(sw3Pin, INPUT_PULLUP);
+  pinMode(sw4Pin, INPUT_PULLUP);
+  pinMode(midiLed, OUTPUT);
+  pinMode(ch1Led, OUTPUT);
+  pinMode(ch2Led, OUTPUT);
+  pinMode(ch3Led, OUTPUT);
+  pinMode(ch4Led, OUTPUT);
+  pinMode(0, OUTPUT);
+  pinMode(1, OUTPUT);
+  pinMode(2, OUTPUT);
+  pinMode(3, OUTPUT);
+  pinMode(4, OUTPUT);
+  pinMode(5, OUTPUT);
+  pinMode(6, OUTPUT);
+  pinMode(11, OUTPUT);
+  pinMode(9, OUTPUT);
+  pinMode(10, OUTPUT);
+  pinMode(strain1Pin, INPUT);
+  pinMode(strain2Pin, INPUT);
+  pinMode(strain3Pin, INPUT);
+  pinMode(strain4Pin, INPUT);
+
+
+// BOOT ROUTINE
+  delay(300);
+  digitalWrite(21, HIGH);
+  delay(50);
+  digitalWrite(21, LOW);
+  delay(100);
+  digitalWrite(22, HIGH);
+  delay(50);
+  digitalWrite(22, LOW);
+  delay(100);
+  digitalWrite(23, HIGH);
+  delay(50);
+  digitalWrite(23, LOW);
+  delay(100);
+  digitalWrite(24, HIGH);
+  delay(50);
+  digitalWrite(24, LOW);
+
+  zero = HIGH; // Perform zeroing at boot
+  midiRx = LOW;
+  digitalWrite(midiLed, LOW);
+
+}
+
+
+void loop() {
+  
+  usbMIDI.read(); // Check for incoming MIDI
+
+//*****Low-pass filter coefficient
+  filterVal = 0.75; //applies to all inputs. Must = 0 to 1. 
+
+//*****Read inputs and switches
+  strain1 = analogRead(strain1Pin);
+  smoothedVal1 =  smooth(strain1, filterVal, smoothedVal1);
+
+  strain2 = analogRead(strain2Pin);
+  smoothedVal2 =  smooth(strain2, filterVal, smoothedVal2);
+
+  strain3 = analogRead(strain3Pin);
+  smoothedVal3 =  smooth(strain3, filterVal, smoothedVal3);
+
+  strain4 = analogRead(strain4Pin);
+  smoothedVal4 =  smooth(strain4, filterVal, smoothedVal4);
+
+  sw1 = 1 - digitalRead(sw1Pin); // switch variables are HIGH when pressed.
+  sw2 = 1 - digitalRead(sw2Pin);
+  sw3 = 1 - digitalRead(sw3Pin);
+  sw4 = 1 - digitalRead(sw4Pin);
+ 
+
+//*****Apply offsets from zeroing
+  output1 = smoothedVal1 - offset1;
+  output2 = smoothedVal2 - offset2;
+  output3 = smoothedVal3 - offset3;
+  output4 = smoothedVal4 - offset4;
+
+
+//*****Scale output for MIDI
+  midiOut1 = constrain(output1 / ccScale, 0, 127);
+  midiOut2 = constrain(output2 / ccScale, 0, 127);
+  midiOut3 = constrain(output3 / ccScale, 0, 127);
+  midiOut4 = constrain(output4 / ccScale, 0, 127);
+
+
+//*****Bargraph logic
+  if (output2 < output1 && output3 < output1 && output4 < output1) { // find the highest value channel
+    maxVal = output1;
+    maxLed = ch1Led;
+  }
+  if (output1 < output2 && output3 < output2 && output4 < output2) {
+    maxVal = output2;
+    maxLed = ch2Led;
+  }
+  if (output1 < output3 && output2 < output3 && output4 < output3) {
+    maxVal = output3;
+    maxLed = ch3Led;
+  }
+  if (output1 < output4 && output2 < output4 && output3 < output4) {
+    maxVal = output4;
+    maxLed = ch4Led;
+  }
+
+  //bargraph(maxVal); // moved this until after zeroing
+
+  if(maxLed != ch1Led) // make leds correspond to switches, unless on the max value channel
+    digitalWrite(ch1Led, sw1);
+  else
+    blinkState = sw1;  // if it is the max value channel, save the state of its switch.
+
+  if(maxLed != ch2Led)
+    digitalWrite(ch2Led, sw2);
+  else
+    blinkState = sw2;  
+    
+  if(maxLed != ch3Led)
+    digitalWrite(ch3Led, sw3);
+  else
+    blinkState = sw3;  
+
+  if(maxLed != ch4Led)
+    digitalWrite(ch4Led, sw4);
+  else
+    blinkState = sw4;  
+
+  if(maxVal > 244) {        // this blinks the led on the max value channel, as long as the bargraph is at 1 bar (245) or higher.
+    switch (blinkTime) { 
+     case 0 :
+      digitalWrite(maxLed, (1 - blinkState));
+      blinkTime++;
+      break;
+     case 8 :
+      digitalWrite(maxLed, blinkState);
+      blinkTime++;
+      break;
+     case 50 :
+      blinkTime = 0;
+      break;
+     default :
+      blinkTime++;
+      break;
+    }
+  }
+  else
+    digitalWrite(maxLed, blinkState);  // if bargraph not lit, just display the max val led as its corresponding switch
+
+
+//*****USB MIDI and MIDI serial port outputs
+
+  if(sw1 == HIGH && prevOut1 != midiOut1) { // only send values if button pressed and if value has changed. Hardware midi only if no USB MIDI has been received.
+    prevOut1 = midiOut1;
+    usbMIDI.sendControlChange(1, midiOut1, 1);
+    usbMIDI.sendPitchBend(smoothedVal1, 1);
+    if(midiRx == LOW)
+       MIDI.sendControlChange(1, midiOut1, 1);
+  }
+
+  if(sw2 == HIGH && prevOut2 != midiOut2) {
+    prevOut2 = midiOut2;
+    usbMIDI.sendControlChange(2, midiOut2, 1);
+    usbMIDI.sendPitchBend(smoothedVal2, 1);
+    if(midiRx == LOW)
+       MIDI.sendControlChange(2, midiOut2, 1); 
+  }
+
+  if(sw3 == HIGH && prevOut3 != midiOut3) {
+    prevOut3 = midiOut3;
+    usbMIDI.sendControlChange(3, midiOut3, 1); 
+    usbMIDI.sendPitchBend(smoothedVal3, 1);
+    if(midiRx == LOW)
+       MIDI.sendControlChange(3, midiOut3, 1);
+  }
+
+  if(sw4 == HIGH && prevOut4 != midiOut4) {
+    prevOut4 = midiOut4;
+    usbMIDI.sendControlChange(4, midiOut4, 1); 
+    usbMIDI.sendPitchBend(smoothedVal4, 1);
+    if(midiRx == LOW)
+       MIDI.sendControlChange(4, midiOut4, 1);
+  }
+
+
+
+//*****Zeroing
+  if(zero == HIGH) {
+    zeroTime++;
+    maxVal = 900;           // set bargraph to 100%
+    if (zeroTime > 80) {   // this code only runs once, when zeroing is complete (wait 80 cycles for stability)
+      zero = LOW;
+      maxVal = 0;
+      zeroTime = 0;
+      offset1 = smoothedVal1 - zeroVal; // set offsets
+      offset2 = smoothedVal2 - zeroVal;
+      offset3 = smoothedVal3 - zeroVal;
+      offset4 = smoothedVal4 - zeroVal;
+
+      for(int fade = 9; fade >= 0; fade--) { // fade bargraph
+        digitalWrite(barGraph[fade], HIGH);
+        delay(50);
+        }
+     }
+  }
+
+  bargraph(maxVal); // display bargraph value
+
+  delay(10); // refresh rate
+
+} // end main program
+
+
+
+// FUNCTIONS
+
+
+//*****Handle incoming usb MIDI
+
+void ctlin(byte channel, byte control, byte value) { 
+
+  MIDI.sendControlChange(control, value, channel);
+
+  digitalWrite(midiLed, HIGH); // can only be reset by reboot.
+  midiRx = HIGH;  // variable used to prevent sending floor values in main code.
+
+} // end MIDI interface handling. 
+
+
+
+//*****Low-Pass filtering
+int smooth(int data, float filterVal, int smoothedVal){ // filtering
+
+
+  if (filterVal > 1){      // check to make sure param's are within range
+    filterVal = .99;
+  }
+  else if (filterVal <= 0){
+    filterVal = 0;
+  }
+
+  smoothedVal = (data * (1 - filterVal)) + (smoothedVal  *  filterVal);
+
+  return (int)smoothedVal;
+  
+} // end LP filter
+
+
+
+
+
+//*****Bargraph logic
+int bargraph(int level) {
+  
+  if(level > 245)
+    digitalWrite(10, LOW);
+  else
+    digitalWrite(10, HIGH);
+
+  if(level > 308)
+    digitalWrite(9, LOW);
+  else
+    digitalWrite(9, HIGH);
+
+    if(level > 371) 
+    digitalWrite(11, LOW);
+  else
+    digitalWrite(11, HIGH);
+
+    if(level > 434)
+    digitalWrite(6, LOW);
+  else
+    digitalWrite(6, HIGH);
+
+    if(level > 497)
+    digitalWrite(5, LOW);
+  else
+    digitalWrite(5, HIGH);
+
+    if(level > 560)
+    digitalWrite(4, LOW);
+  else
+    digitalWrite(4, HIGH);
+
+    if(level > 623)
+    digitalWrite(3, LOW);
+  else
+    digitalWrite(3, HIGH);
+
+    if(level > 686)
+    digitalWrite(2, LOW);
+  else
+    digitalWrite(2, HIGH);
+
+    if(level > 749)
+    digitalWrite(1, LOW);
+  else
+    digitalWrite(1, HIGH);
+
+    if(level > 812)
+    digitalWrite(0, LOW);
+  else
+    digitalWrite(0, HIGH);
+ 
+
+} // end bargraph   
